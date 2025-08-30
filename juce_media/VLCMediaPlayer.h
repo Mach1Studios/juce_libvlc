@@ -38,7 +38,7 @@ public:
 
     //==============================================================================
     // ISeekableMedia implementation
-    bool open (const File& media, String* error = nullptr) override;
+    bool open(const File& media, String* error = nullptr) override;
     void close() override;
     
     void play() override;
@@ -60,6 +60,9 @@ public:
     bool hasVideo() const override;
     bool hasAudio() const override;
     Rectangle<int> getVideoSize() const override;
+    
+    // Video frame access
+    juce::Image getCurrentVideoFrame() const;
     
     void addListener (Listener* listener) override;
     void removeListener (Listener* listener) override;
@@ -124,6 +127,12 @@ private:
     std::atomic<bool> hasVideoStream { false };
     std::atomic<bool> hasAudioStream { false };
     
+    // Video frame capture
+    juce::Image currentVideoFrame;
+    std::mutex videoFrameMutex;
+    std::unique_ptr<uint8_t[]> videoFrameBuffer;
+    size_t videoFrameBufferSize { 0 };
+    
     // Playback state
     std::atomic<bool> isCurrentlyPlaying { false };
     std::atomic<double> mediaDuration { -1.0 };
@@ -170,6 +179,7 @@ private:
     // Video processing
     void setupVideoOutput();
     void updateVideoSize (int width, int height);
+    void updateVideoFrameFromBuffer();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VLCMediaPlayer)
 };

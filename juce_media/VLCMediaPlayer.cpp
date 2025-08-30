@@ -126,6 +126,7 @@ void VLCMediaPlayer::initializeVLC()
         "--no-video-title-show",        // Disable video title overlay
         "--verbose=0",                  // Reduce verbosity
         "--aout=dummy",                 // Use dummy audio output to prevent conflicts with JUCE
+        "--vout=dummy",                 // Use dummy video output to prevent window creation
         "--network-caching=1000",       // Network caching (ms)
         "--file-caching=1000",          // File caching (ms)
         "--live-caching=1000",          // Live stream caching (ms)
@@ -248,10 +249,17 @@ bool VLCMediaPlayer::open (const File& media, String* error)
     setupVideoCallbacks();
     
     // Parse media to get information (use simpler API for compatibility)
+    DBG("VLCMediaPlayer::open - Starting media parsing");
     libvlc_media_parse (currentMedia);
+    
+    // Wait a bit for parsing to complete, then update media information
+    // Note: libvlc_media_parse is asynchronous, so we need to wait
+    juce::Thread::sleep(50);  // Give VLC some time to start parsing
     
     // Update media information
     updateMediaInfo();
+    
+    DBG("VLCMediaPlayer::open - Media parsing and info update completed");
     
     return true;
 }
@@ -597,19 +605,47 @@ void VLCMediaPlayer::audioDrainCallback (void* data)
 // libVLC Video Callbacks
 void* VLCMediaPlayer::videoLockCallback (void* data, void** planes)
 {
-    ignoreUnused (data, planes);
-    // Video rendering implementation would go here
+    if (data == nullptr || planes == nullptr)
+        return nullptr;
+        
+    auto* player = static_cast<VLCMediaPlayer*>(data);
+    if (player == nullptr)
+        return nullptr;
+    
+    // Return pointer to our video frame buffer
+    if (player->videoFrameBuffer != nullptr)
+    {
+        *planes = player->videoFrameBuffer.get();
+        return player->videoFrameBuffer.get();
+    }
+    
     return nullptr;
 }
 
 void VLCMediaPlayer::videoUnlockCallback (void* data, void* picture, void* const* planes)
 {
-    ignoreUnused (data, picture, planes);
+    if (data == nullptr || picture == nullptr || planes == nullptr)
+        return;
+        
+    auto* player = static_cast<VLCMediaPlayer*>(data);
+    if (player == nullptr)
+        return;
+    
+    // Video frame data is now available in the buffer
+    // We'll process it in the display callback
 }
 
 void VLCMediaPlayer::videoDisplayCallback (void* data, void* picture)
 {
-    ignoreUnused (data, picture);
+    if (data == nullptr || picture == nullptr)
+        return;
+        
+    auto* player = static_cast<VLCMediaPlayer*>(data);
+    if (player == nullptr)
+        return;
+    
+    // Convert the video frame buffer to JUCE Image
+    player->updateVideoFrameFromBuffer();
 }
 
 unsigned VLCMediaPlayer::videoFormatCallback (void** data, char* chroma, unsigned* width, 
@@ -625,6 +661,9 @@ unsigned VLCMediaPlayer::videoFormatCallback (void** data, char* chroma, unsigne
     if (player == nullptr)
         return 0;
     
+    DBG("VLCMediaPlayer::videoFormatCallback - Setting up video format: " + 
+        juce::String(*width) + "x" + juce::String(*height));
+    
     // Set format to RGBA
     memcpy (chroma, "RV32", 4);
     
@@ -632,6 +671,13 @@ unsigned VLCMediaPlayer::videoFormatCallback (void** data, char* chroma, unsigne
     
     *pitches = *width * 4; // 4 bytes per pixel for RGBA
     *lines = *height;
+    
+    // Allocate video frame buffer
+    size_t bufferSize = (*width) * (*height) * 4; // RGBA = 4 bytes per pixel
+    player->videoFrameBufferSize = bufferSize;
+    player->videoFrameBuffer = std::make_unique<uint8_t[]>(bufferSize);
+    
+    DBG("VLCMediaPlayer::videoFormatCallback - Allocated video buffer: " + juce::String(bufferSize) + " bytes");
     
     return 1; // Success
 }
@@ -660,17 +706,18 @@ void VLCMediaPlayer::setupVideoCallbacks()
     if (mediaPlayer == nullptr)
         return;
     
-    // Temporarily disable video callbacks to prevent memory corruption
-    // TODO: Implement proper video rendering with thread-safe callbacks
-    // libvlc_video_set_callbacks (mediaPlayer,
-    //                            videoLockCallback,
-    //                            videoUnlockCallback,
-    //                            videoDisplayCallback,
-    //                            this);
+    DBG("VLCMediaPlayer::setupVideoCallbacks - Setting up video callbacks for frame capture");
     
-    // libvlc_video_set_format_callbacks (mediaPlayer,
-    //                                   videoFormatCallback,
-    //                                   videoCleanupCallback);
+    // Enable video callbacks for frame capture
+    libvlc_video_set_callbacks (mediaPlayer,
+                               videoLockCallback,
+                               videoUnlockCallback,
+                               videoDisplayCallback,
+                               this);
+    
+    libvlc_video_set_format_callbacks (mediaPlayer,
+                                      videoFormatCallback,
+                                      videoCleanupCallback);
 }
 
 void VLCMediaPlayer::setupVideoOutput()
@@ -709,24 +756,103 @@ void VLCMediaPlayer::setupEventHandling()
 void VLCMediaPlayer::updateMediaInfo()
 {
     if (currentMedia == nullptr)
+    {
+        DBG("VLCMediaPlayer::updateMediaInfo - No current media");
         return;
+    }
+    
+    DBG("VLCMediaPlayer::updateMediaInfo - Updating media information");
     
     // Get duration
     int64_t durationMs = libvlc_media_get_duration (currentMedia);
+    DBG("VLCMediaPlayer::updateMediaInfo - Duration from libVLC: " + juce::String(durationMs) + " ms");
+    
     if (durationMs > 0)
     {
         mediaDuration = static_cast<double>(durationMs) / 1000.0;
+        DBG("VLCMediaPlayer::updateMediaInfo - Set mediaDuration to: " + juce::String(mediaDuration.load()) + " seconds");
         
         double sampleRate = currentSampleRate.load();
         if (sampleRate > 0.0)
+        {
             totalAudioSamples = static_cast<int64_t>(mediaDuration.load() * sampleRate);
+            DBG("VLCMediaPlayer::updateMediaInfo - Calculated totalAudioSamples: " + juce::String(totalAudioSamples.load()));
+        }
+    }
+    else if (durationMs == 0)
+    {
+        DBG("VLCMediaPlayer::updateMediaInfo - Duration is 0, might be a live stream or unknown duration");
+        mediaDuration = -1.0;  // Keep as unknown
+    }
+    else
+    {
+        DBG("VLCMediaPlayer::updateMediaInfo - Duration is negative (" + juce::String(durationMs) + "), media not yet parsed");
+        mediaDuration = -1.0;  // Keep as unknown until parsing completes
     }
     
-    // Check for audio/video tracks
-    if (mediaPlayer != nullptr)
+    // Check for audio/video tracks using media tracks (not player tracks)
+    // Note: libvlc_audio_get_track_count and libvlc_video_get_track_count only work after playback starts
+    // We need to use libvlc_media_tracks_get to get track info from parsed media
+    if (currentMedia != nullptr)
     {
-        hasAudioStream = (libvlc_audio_get_track_count (mediaPlayer) > 0);
-        hasVideoStream = (libvlc_video_get_track_count (mediaPlayer) > 0);
+        libvlc_media_track_t** tracks = nullptr;
+        unsigned int trackCount = libvlc_media_tracks_get(currentMedia, &tracks);
+        
+        DBG("VLCMediaPlayer::updateMediaInfo - Total track count from media: " + juce::String(trackCount));
+        
+        int audioTrackCount = 0;
+        int videoTrackCount = 0;
+        
+        for (unsigned int i = 0; i < trackCount; ++i)
+        {
+            if (tracks[i] != nullptr)
+            {
+                switch (tracks[i]->i_type)
+                {
+                    case libvlc_track_audio:
+                        audioTrackCount++;
+                        DBG("VLCMediaPlayer::updateMediaInfo - Found audio track " + juce::String(i));
+                        break;
+                    case libvlc_track_video:
+                        videoTrackCount++;
+                        DBG("VLCMediaPlayer::updateMediaInfo - Found video track " + juce::String(i) + 
+                            " - " + juce::String(tracks[i]->video->i_width) + "x" + juce::String(tracks[i]->video->i_height));
+                        
+                        // Store video dimensions
+                        if (tracks[i]->video != nullptr)
+                        {
+                            videoWidth = tracks[i]->video->i_width;
+                            videoHeight = tracks[i]->video->i_height;
+                        }
+                        break;
+                    case libvlc_track_text:
+                        DBG("VLCMediaPlayer::updateMediaInfo - Found subtitle track " + juce::String(i));
+                        break;
+                    default:
+                        DBG("VLCMediaPlayer::updateMediaInfo - Found unknown track type " + juce::String(tracks[i]->i_type));
+                        break;
+                }
+            }
+        }
+        
+        // Release track info
+        if (tracks != nullptr)
+        {
+            libvlc_media_tracks_release(tracks, trackCount);
+        }
+        
+        DBG("VLCMediaPlayer::updateMediaInfo - Audio track count: " + juce::String(audioTrackCount));
+        DBG("VLCMediaPlayer::updateMediaInfo - Video track count: " + juce::String(videoTrackCount));
+        
+        hasAudioStream = (audioTrackCount > 0);
+        hasVideoStream = (videoTrackCount > 0);
+        
+        DBG("VLCMediaPlayer::updateMediaInfo - hasAudioStream: " + juce::String(hasAudioStream.load() ? "true" : "false"));
+        DBG("VLCMediaPlayer::updateMediaInfo - hasVideoStream: " + juce::String(hasVideoStream.load() ? "true" : "false"));
+    }
+    else
+    {
+        DBG("VLCMediaPlayer::updateMediaInfo - No current media available");
     }
     
     // Notify listeners that media is ready
@@ -797,6 +923,64 @@ void VLCMediaPlayer::updateVideoSize (int width, int height)
                 videoComponent->setSize (width, height);
         });
     }
+}
+
+void VLCMediaPlayer::updateVideoFrameFromBuffer()
+{
+    if (videoFrameBuffer == nullptr || videoFrameBufferSize == 0)
+        return;
+    
+    int width = videoWidth.load();
+    int height = videoHeight.load();
+    
+    if (width <= 0 || height <= 0)
+        return;
+    
+    std::lock_guard<std::mutex> lock(videoFrameMutex);
+    
+    // Create or recreate the JUCE Image if dimensions changed
+    if (!currentVideoFrame.isValid() || 
+        currentVideoFrame.getWidth() != width || 
+        currentVideoFrame.getHeight() != height)
+    {
+        currentVideoFrame = juce::Image(juce::Image::ARGB, width, height, true);
+        DBG("VLCMediaPlayer::updateVideoFrameFromBuffer - Created new video frame: " + 
+            juce::String(width) + "x" + juce::String(height));
+    }
+    
+    // Copy video data from VLC buffer to JUCE Image
+    juce::Image::BitmapData bitmapData(currentVideoFrame, juce::Image::BitmapData::writeOnly);
+    
+    // VLC provides RGBA data, JUCE expects ARGB
+    // We need to convert RGBA -> ARGB
+    const uint8_t* srcData = videoFrameBuffer.get();
+    uint8_t* destData = bitmapData.data;
+    
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            int srcIndex = (y * width + x) * 4;
+            int destIndex = y * bitmapData.lineStride + x * bitmapData.pixelStride;
+            
+            // Convert RGBA to ARGB
+            uint8_t r = srcData[srcIndex + 0];
+            uint8_t g = srcData[srcIndex + 1];
+            uint8_t b = srcData[srcIndex + 2];
+            uint8_t a = srcData[srcIndex + 3];
+            
+            destData[destIndex + 0] = b; // Blue
+            destData[destIndex + 1] = g; // Green  
+            destData[destIndex + 2] = r; // Red
+            destData[destIndex + 3] = a; // Alpha
+        }
+    }
+}
+
+juce::Image VLCMediaPlayer::getCurrentVideoFrame() const
+{
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(videoFrameMutex));
+    return currentVideoFrame;
 }
 
 } // namespace juce
