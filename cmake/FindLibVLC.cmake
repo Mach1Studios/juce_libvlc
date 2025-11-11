@@ -27,7 +27,8 @@ if(LIBVLC_BUILD_FROM_SOURCE)
     set(VLC_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../vlc")
     set(VLC_INSTALL_DIR "${CMAKE_BINARY_DIR}/vlc-install")
     
-    if(EXISTS "${VLC_SOURCE_DIR}/meson.build")
+    # Check for VLC source (supports both autotools and meson)
+    if(EXISTS "${VLC_SOURCE_DIR}/meson.build" OR EXISTS "${VLC_SOURCE_DIR}/configure.ac" OR EXISTS "${VLC_SOURCE_DIR}/configure")
         message(STATUS "Building from source: Looking for pre-built VLC libraries")
         message(STATUS "  Expected location: ${VLC_INSTALL_DIR}")
         
@@ -41,7 +42,7 @@ if(LIBVLC_BUILD_FROM_SOURCE)
             set(LIBVLC_STATIC ON)
             set(LibVLC_FOUND TRUE)
             set(LibVLC_INCLUDE_DIRS "${VLC_INSTALL_DIR}/include")
-            set(LibVLC_VERSION "4.0.0")
+            set(LibVLC_VERSION "3.0.22")
             
             # Create imported targets
             add_library(vlc STATIC IMPORTED GLOBAL)
@@ -56,16 +57,49 @@ if(LIBVLC_BUILD_FROM_SOURCE)
                 INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
             )
             
-            # Create LibVLC::LibVLC interface target
+            # Add libcompat if it exists (provides memrchr, tdestroy, etc.)
+            if(EXISTS "${VLC_INSTALL_DIR}/lib/vlc/libcompat.a")
+                add_library(vlccompat STATIC IMPORTED GLOBAL)
+                set_target_properties(vlccompat PROPERTIES
+                    IMPORTED_LOCATION "${VLC_INSTALL_DIR}/lib/vlc/libcompat.a"
+                )
+                message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/vlc/libcompat.a")
+            endif()
+            
+            # Create LibVLC::LibVLC interface target with all dependencies
             add_library(LibVLC::LibVLC INTERFACE IMPORTED GLOBAL)
+            
+            # Link VLC libraries
+            set(VLC_LINK_LIBS vlc vlccore)
+            if(TARGET vlccompat)
+                list(APPEND VLC_LINK_LIBS vlccompat)
+            endif()
+            
+            # Add system dependencies for static linking
+            if(APPLE)
+                # macOS frameworks and libraries required by VLC
+                list(APPEND VLC_LINK_LIBS
+                    "-liconv"                          # Character encoding
+                    "-framework CoreFoundation"        # macOS Core Foundation
+                    "-framework CoreServices"          # macOS Core Services
+                    "m"                                # Math library
+                )
+            elseif(UNIX)
+                # Linux system libraries
+                list(APPEND VLC_LINK_LIBS
+                    "iconv"
+                    "m"
+                )
+            endif()
+            
             set_property(TARGET LibVLC::LibVLC PROPERTY
-                INTERFACE_LINK_LIBRARIES vlc vlccore
+                INTERFACE_LINK_LIBRARIES ${VLC_LINK_LIBS}
             )
             set_property(TARGET LibVLC::LibVLC PROPERTY
                 INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
             )
             
-            set(LibVLC_LIBRARIES vlc vlccore)
+            set(LibVLC_LIBRARIES ${VLC_LINK_LIBS})
             
             message(STATUS "Using pre-built VLC static libraries")
             return()
