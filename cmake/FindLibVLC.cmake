@@ -21,27 +21,89 @@ include(FindPackageHandleStandardArgs)
 set(LIBVLC_STATIC OFF CACHE BOOL "Link libVLC statically")
 set(LIBVLC_BUILD_FROM_SOURCE OFF CACHE BOOL "Build libVLC from source")
 
-# If building from source, check if VLC source directory exists
+# If building from source, look for pre-built VLC libraries
+# User should run m1-player/build_vlc.sh <build-dir> after CMake configure
 if(LIBVLC_BUILD_FROM_SOURCE)
     set(VLC_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../vlc")
+    set(VLC_INSTALL_DIR "${CMAKE_BINARY_DIR}/vlc-install")
     
-    if(EXISTS "${VLC_SOURCE_DIR}/CMakeLists.txt")
-        message(STATUS "Building libVLC from source in ${VLC_SOURCE_DIR}")
+    if(EXISTS "${VLC_SOURCE_DIR}/meson.build")
+        message(STATUS "Building from source: Looking for pre-built VLC libraries")
+        message(STATUS "  Expected location: ${VLC_INSTALL_DIR}")
         
-        # Add VLC subdirectory
-        add_subdirectory("${VLC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/vlc_build")
-        
-        # The VLC CMakeLists.txt will create the LibVLC::LibVLC target
-        if(TARGET LibVLC::LibVLC)
+        # Check if libraries exist
+        if(EXISTS "${VLC_INSTALL_DIR}/lib/libvlc.a" AND EXISTS "${VLC_INSTALL_DIR}/lib/libvlccore.a")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlc.a")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlccore.a")
+            
+            # Set variables to point to pre-built libraries
+            set(LIBVLC_ROOT "${VLC_INSTALL_DIR}")
+            set(LIBVLC_STATIC ON)
             set(LibVLC_FOUND TRUE)
-            set(LibVLC_INCLUDE_DIRS "${VLC_SOURCE_DIR}/include")
+            set(LibVLC_INCLUDE_DIRS "${VLC_INSTALL_DIR}/include")
             set(LibVLC_VERSION "4.0.0")
             
-            message(STATUS "libVLC configured to build from source")
+            # Create imported targets
+            add_library(vlc STATIC IMPORTED GLOBAL)
+            set_target_properties(vlc PROPERTIES
+                IMPORTED_LOCATION "${VLC_INSTALL_DIR}/lib/libvlc.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            add_library(vlccore STATIC IMPORTED GLOBAL)
+            set_target_properties(vlccore PROPERTIES
+                IMPORTED_LOCATION "${VLC_INSTALL_DIR}/lib/libvlccore.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            # Create LibVLC::LibVLC interface target
+            add_library(LibVLC::LibVLC INTERFACE IMPORTED GLOBAL)
+            set_property(TARGET LibVLC::LibVLC PROPERTY
+                INTERFACE_LINK_LIBRARIES vlc vlccore
+            )
+            set_property(TARGET LibVLC::LibVLC PROPERTY
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            set(LibVLC_LIBRARIES vlc vlccore)
+            
+            message(STATUS "Using pre-built VLC static libraries")
             return()
+        else()
+            message(STATUS "")
+            message(STATUS "========================================")
+            message(STATUS "VLC libraries not found!")
+            message(STATUS "========================================")
+            message(STATUS "This is expected on first configure.")
+            message(STATUS "Build VLC first by running:")
+            message(STATUS "  cd ${CMAKE_SOURCE_DIR}")
+            if(CMAKE_BUILD_TYPE MATCHES "Debug" OR CMAKE_BINARY_DIR MATCHES "build-dev")
+                message(STATUS "  ./build_vlc.sh build-dev")
+            else()
+                message(STATUS "  ./build_vlc.sh build")
+            endif()
+            message(STATUS "")
+            message(STATUS "Or from the repo root:")
+            message(STATUS "  make build-vlc")
+            message(STATUS "")
+            message(STATUS "Then reconfigure CMake:")
+            if(CMAKE_BUILD_TYPE MATCHES "Debug" OR CMAKE_BINARY_DIR MATCHES "build-dev")
+                message(STATUS "  make dev-player")
+            else()
+                message(STATUS "  make configure")
+            endif()
+            message(STATUS "========================================")
+            message(STATUS "")
+            message(WARNING "VLC static libraries not built yet. Run build_vlc.sh then reconfigure.")
+            
+            # Don't fail here - allow configuration to complete so build directory exists
+            # User will need to build VLC and reconfigure
+            set(LIBVLC_BUILD_FROM_SOURCE OFF)
+            set(LibVLC_FOUND FALSE)
         endif()
     else()
-        message(WARNING "VLC source directory not found at ${VLC_SOURCE_DIR}. Falling back to system search.")
+        message(WARNING "VLC source not found at ${VLC_SOURCE_DIR}")
+        message(WARNING "  Run: git submodule update --init --recursive")
         set(LIBVLC_BUILD_FROM_SOURCE OFF)
     endif()
 endif()
