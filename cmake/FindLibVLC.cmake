@@ -32,7 +32,30 @@ if(LIBVLC_BUILD_FROM_SOURCE)
         message(STATUS "Building from source: Looking for pre-built VLC libraries")
         message(STATUS "  Expected location: ${VLC_INSTALL_DIR}")
         
-        # Check if libraries exist
+        # Check if shared libraries exist (if not strictly static)
+        if(NOT LIBVLC_STATIC AND EXISTS "${VLC_INSTALL_DIR}/lib/libvlc.dylib")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlc.dylib")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlccore.dylib")
+
+            # Set variables to point to pre-built libraries
+            set(LIBVLC_ROOT "${VLC_INSTALL_DIR}")
+            set(LibVLC_FOUND TRUE)
+            set(LibVLC_INCLUDE_DIRS "${VLC_INSTALL_DIR}/include")
+            # Assume version
+            set(LibVLC_VERSION "3.0.22")
+
+            # Create imported targets
+            add_library(LibVLC::LibVLC SHARED IMPORTED GLOBAL)
+            set_target_properties(LibVLC::LibVLC PROPERTIES
+                IMPORTED_LOCATION "${VLC_INSTALL_DIR}/lib/libvlc.dylib"
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            message(STATUS "Using pre-built VLC shared libraries")
+            return()
+        endif()
+
+        # Check if static libraries exist
         if(EXISTS "${VLC_INSTALL_DIR}/lib/libvlc.a" AND EXISTS "${VLC_INSTALL_DIR}/lib/libvlccore.a")
             message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlc.a")
             message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlccore.a")

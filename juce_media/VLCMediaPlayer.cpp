@@ -92,39 +92,42 @@ void VLCMediaPlayer::initializeVLC()
 {
     DBG ("Attempting to initialize libVLC...");
     
-    // Check VLC installation first
-    juce::File vlcApp ("/Applications/VLC.app");
-    if (!vlcApp.exists())
+    // When using statically linked VLC, plugins are loaded from bundled location
+    // Try to find plugins relative to the application bundle
+    juce::File appBundle = juce::File::getSpecialLocation(juce::File::currentApplicationFile);
+    juce::File pluginsDir;
+    
+    // First check if we're in an app bundle
+    if (appBundle.getFileExtension() == ".app")
     {
-        DBG ("VLC.app not found at /Applications/VLC.app - libVLC will not work");
-        return;
+        // Standard macOS app bundle structure
+        pluginsDir = appBundle.getChildFile("Contents/PlugIns/vlc/plugins");
+        
+        if (!pluginsDir.exists())
+        {
+            // Try alternative location
+            pluginsDir = appBundle.getChildFile("Contents/Resources/vlc/plugins");
+        }
     }
     
-    // Set environment variables for libVLC to find its components
-    juce::File pluginsDir = vlcApp.getChildFile ("Contents/MacOS/plugins");
-    juce::File libDir = vlcApp.getChildFile ("Contents/MacOS/lib");
-    
+    // If plugins found, set the path for VLC
     if (pluginsDir.exists())
     {
-        DBG ("Setting VLC_PLUGIN_PATH to: " + pluginsDir.getFullPathName());
+        DBG ("Found VLC plugins at: " + pluginsDir.getFullPathName());
         setenv("VLC_PLUGIN_PATH", pluginsDir.getFullPathName().toUTF8(), 1);
     }
-    
-    if (libDir.exists())
+    else
     {
-        DBG ("Setting DYLD_LIBRARY_PATH to: " + libDir.getFullPathName());
-        juce::String currentPath = getenv("DYLD_LIBRARY_PATH") ? getenv("DYLD_LIBRARY_PATH") : "";
-        juce::String newPath = libDir.getFullPathName();
-        if (currentPath.isNotEmpty())
-            newPath += ":" + currentPath;
-        setenv("DYLD_LIBRARY_PATH", newPath.toUTF8(), 1);
+        DBG ("VLC plugins not found in app bundle - VLC will use static plugins if available");
+        // For static plugins, VLC doesn't need VLC_PLUGIN_PATH
+        // The vlc_static_modules array in juce_libvlc.cpp handles this
     }
     
     // Try initialization with minimal, compatible arguments
     const char* const vlc_args[] = {
         "--intf=dummy",                 // Use dummy interface (essential)
         "--no-video-title-show",        // Disable video title overlay
-        "--verbose=0",                  // Reduce verbosity
+        "--verbose=2",                  // Enable more verbose output to debug
         "--aout=dummy",                 // Use dummy audio output to prevent conflicts with JUCE
         "--vout=dummy",                 // Use dummy video output to prevent window creation
         "--network-caching=1000",       // Network caching (ms)
@@ -145,13 +148,8 @@ void VLCMediaPlayer::initializeVLC()
     if (vlcInstance == nullptr)
     {
         DBG ("Failed to initialize libVLC instance - all methods failed");
-        DBG ("VLC.app path: " + vlcApp.getFullPathName());
-        DBG ("VLC lib path: " + libDir.getFullPathName());
-        DBG ("VLC plugins path: " + pluginsDir.getFullPathName());
         
         // Check if the library file exists
-        juce::File libVLC = libDir.getChildFile ("libvlc.dylib");
-        DBG ("libvlc.dylib exists: " + juce::String (libVLC.exists() ? "YES" : "NO"));
         
         // Try to get more detailed error information
         DBG ("Current working directory: " + juce::File::getCurrentWorkingDirectory().getFullPathName());

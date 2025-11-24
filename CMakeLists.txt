@@ -12,7 +12,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     
-    # Add cmake modules path for FindLibVLC.cmake
+    # Add cmake modules path
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
     
     # Find required packages
@@ -106,11 +106,7 @@ endif()
 
 # Note: When using this as a JUCE module in your project:
 # 1. Copy this directory to your project's modules folder
-# 2. Add the FindLibVLC.cmake directory to your CMAKE_MODULE_PATH:
-#    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/path/to/juce_libvlc/cmake")
-# 3. (Optional) Configure libVLC before adding the module:
-#    set(LIBVLC_ROOT "/path/to/custom/vlc" CACHE PATH "Custom libVLC root")
-#    set(LIBVLC_STATIC ON CACHE BOOL "Link libVLC statically")
-# 4. Add the module: juce_add_module(path/to/juce_libvlc)
-# 5. Link to your target: target_link_libraries(YourTarget PRIVATE juce_libvlc)
-# 6. Link LibVLC explicitly: target_link_libraries(YourTarget PRIVATE LibVLC::LibVLC)
+# 2. Add the module: juce_add_module(path/to/juce_libvlc)
+# 3. Link to your target: target_link_libraries(YourTarget PRIVATE juce_libvlc)
+# 4. Ensure libVLC is available on your system
+# 5. You may need to link LibVLC explicitly: target_link_libraries(YourTarget PRIVATE LibVLC::LibVLC)
