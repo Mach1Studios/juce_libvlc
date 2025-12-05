@@ -10,6 +10,7 @@
 
 // Include libVLC headers
 #include <vlc/vlc.h>
+#include <cstring>  // for std::memcpy
 
 namespace juce
 {
@@ -1052,29 +1053,23 @@ void VLCMediaPlayer::updateVideoFrameFromBuffer()
     // Copy video data from VLC buffer to JUCE Image
     juce::Image::BitmapData bitmapData(currentVideoFrame, juce::Image::BitmapData::writeOnly);
     
-    // VLC provides RGBA data, JUCE expects ARGB
-    // We need to convert RGBA -> ARGB
+    // VLC's RV32 format is BGRA (32-bit with bytes: B, G, R, A in memory)
+    // JUCE's ARGB format on macOS is also stored as BGRA in memory (little-endian)
+    // So we can copy directly without channel swapping
     const uint8_t* srcData = videoFrameBuffer.get();
     uint8_t* destData = bitmapData.data;
     
+    // Calculate source pitch (bytes per row)
+    int srcPitch = width * 4;
+    
+    // Copy row by row to handle different line strides
     for (int y = 0; y < height; ++y)
     {
-        for (int x = 0; x < width; ++x)
-        {
-            int srcIndex = (y * width + x) * 4;
-            int destIndex = y * bitmapData.lineStride + x * bitmapData.pixelStride;
-            
-            // Convert RGBA to ARGB
-            uint8_t r = srcData[srcIndex + 0];
-            uint8_t g = srcData[srcIndex + 1];
-            uint8_t b = srcData[srcIndex + 2];
-            uint8_t a = srcData[srcIndex + 3];
-            
-            destData[destIndex + 0] = b; // Blue
-            destData[destIndex + 1] = g; // Green  
-            destData[destIndex + 2] = r; // Red
-            destData[destIndex + 3] = a; // Alpha
-        }
+        const uint8_t* srcRow = srcData + (y * srcPitch);
+        uint8_t* destRow = destData + (y * bitmapData.lineStride);
+        
+        // Direct copy - VLC BGRA matches JUCE ARGB memory layout on macOS
+        std::memcpy(destRow, srcRow, srcPitch);
     }
 }
 
