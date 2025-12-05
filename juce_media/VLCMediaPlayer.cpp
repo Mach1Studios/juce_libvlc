@@ -97,42 +97,94 @@ void VLCMediaPlayer::initializeVLC()
     juce::File appBundle = juce::File::getSpecialLocation(juce::File::currentApplicationFile);
     juce::File pluginsDir;
     
+    DBG ("Application path: " + appBundle.getFullPathName());
+    
     // First check if we're in an app bundle
     if (appBundle.getFileExtension() == ".app")
     {
-        // Standard macOS app bundle structure
-        pluginsDir = appBundle.getChildFile("Contents/PlugIns/vlc/plugins");
+        // VLC plugins are stored in Resources (not PlugIns) to avoid codesign issues
+        // with the plugins.dat cache file which is a data file, not code
+        pluginsDir = appBundle.getChildFile("Contents/Resources/vlc/plugins");
+        DBG ("Checking for plugins at: " + pluginsDir.getFullPathName());
         
         if (!pluginsDir.exists())
         {
-            // Try alternative location
-            pluginsDir = appBundle.getChildFile("Contents/Resources/vlc/plugins");
+            // Try legacy PlugIns location for backwards compatibility
+            pluginsDir = appBundle.getChildFile("Contents/PlugIns/vlc/plugins");
+            DBG ("Checking legacy path: " + pluginsDir.getFullPathName());
         }
+        
+        // Set library path for VLC plugin dependencies
+        // Our bundle_vlc_deps.sh script copies Homebrew dependencies to vlc/lib/
+        // and rewrites plugin paths to use @loader_path/../../lib/
+        // We need to ensure the dyld library path includes this location for any
+        // plugins that might have transitive dependencies
+        juce::File libsDir = appBundle.getChildFile("Contents/Resources/vlc/lib");
+        if (libsDir.exists())
+        {
+            DBG ("Found bundled VLC libraries at: " + libsDir.getFullPathName());
+            
+            // Get current DYLD_LIBRARY_PATH and prepend our libs dir
+            const char* currentPath = getenv("DYLD_LIBRARY_PATH");
+            juce::String newPath = libsDir.getFullPathName();
+            if (currentPath != nullptr && strlen(currentPath) > 0)
+            {
+                newPath += ":" + juce::String(currentPath);
+            }
+            setenv("DYLD_LIBRARY_PATH", newPath.toUTF8(), 1);
+            DBG ("Set DYLD_LIBRARY_PATH to include: " + libsDir.getFullPathName());
+        }
+    }
+    else
+    {
+        // Running from build directory or as standalone executable
+        // Try to find plugins relative to executable
+        juce::File executableDir = appBundle.getParentDirectory();
+        pluginsDir = executableDir.getChildFile("vlc-install/lib/vlc/plugins");
+        DBG ("Checking build directory path: " + pluginsDir.getFullPathName());
     }
     
     // If plugins found, set the path for VLC
     if (pluginsDir.exists())
     {
-        DBG ("Found VLC plugins at: " + pluginsDir.getFullPathName());
+        // Verify plugins.dat exists
+        juce::File pluginsCache = pluginsDir.getChildFile("plugins.dat");
+        if (pluginsCache.exists())
+        {
+            DBG ("Found VLC plugins cache at: " + pluginsCache.getFullPathName());
+        }
+        else
+        {
+            DBG ("WARNING: plugins.dat not found - VLC may fail to load plugins!");
+            DBG ("Run 'vlc-cache-gen' on the plugins directory to generate this file.");
+        }
+        
+        DBG ("Setting VLC_PLUGIN_PATH to: " + pluginsDir.getFullPathName());
         setenv("VLC_PLUGIN_PATH", pluginsDir.getFullPathName().toUTF8(), 1);
     }
     else
     {
-        DBG ("VLC plugins not found in app bundle - VLC will use static plugins if available");
-        // For static plugins, VLC doesn't need VLC_PLUGIN_PATH
-        // The vlc_static_modules array in juce_libvlc.cpp handles this
+        DBG ("VLC plugins not found in expected locations");
+        DBG ("VLC will attempt to use static plugins or system paths");
     }
     
-    // Try initialization with minimal, compatible arguments
+    // Build VLC initialization arguments
+    // Note: Don't specify --vout explicitly - VLC automatically uses vmem when
+    // libvlc_video_set_callbacks() is called. Specifying it too early can cause issues.
+    // Audio is disabled since we handle audio through JUCE's audio system.
     const char* const vlc_args[] = {
-        "--intf=dummy",                 // Use dummy interface (essential)
+        "--intf=dummy",                 // Use dummy interface (no UI)
         "--no-video-title-show",        // Disable video title overlay
-        "--verbose=2",                  // Enable more verbose output to debug
-        "--aout=dummy",                 // Use dummy audio output to prevent conflicts with JUCE
-        "--vout=dummy",                 // Use dummy video output to prevent window creation
+        "--verbose=2",                  // Enable verbose output for debugging
+        "--no-audio",                   // Disable VLC audio output (JUCE handles audio)
         "--network-caching=1000",       // Network caching (ms)
         "--file-caching=1000",          // File caching (ms)
         "--live-caching=1000",          // Live stream caching (ms)
+#if JUCE_MAC
+        "--no-xlib",                    // Disable X11 on macOS
+#endif
+        "--no-drop-late-frames",        // Don't drop frames (for precise seeking)
+        "--no-skip-frames",             // Don't skip frames
     };
     
     int argc = sizeof(vlc_args) / sizeof(vlc_args[0]);
@@ -141,19 +193,34 @@ void VLCMediaPlayer::initializeVLC()
     
     if (vlcInstance == nullptr)
     {
-        DBG ("Failed with arguments, trying with no arguments...");
+        // Try with fewer arguments if first attempt fails
+        DBG ("First attempt failed, trying with minimal arguments...");
+        const char* const minimal_args[] = {
+            "--intf=dummy",
+            "--no-video-title-show",
+            "--verbose=2",
+        };
+        vlcInstance = libvlc_new (3, minimal_args);
+    }
+    
+    if (vlcInstance == nullptr)
+    {
+        DBG ("Minimal args failed, trying with no arguments...");
         vlcInstance = libvlc_new (0, nullptr);
     }
     
     if (vlcInstance == nullptr)
     {
         DBG ("Failed to initialize libVLC instance - all methods failed");
-        
-        // Check if the library file exists
-        
-        // Try to get more detailed error information
         DBG ("Current working directory: " + juce::File::getCurrentWorkingDirectory().getFullPathName());
         DBG ("VLC_PLUGIN_PATH env var: " + juce::String (getenv("VLC_PLUGIN_PATH") ? getenv("VLC_PLUGIN_PATH") : "not set"));
+        
+        // Try to get last libVLC error
+        const char* vlcError = libvlc_errmsg();
+        if (vlcError != nullptr)
+        {
+            DBG ("libVLC error: " + juce::String(vlcError));
+        }
         
         return;
     }
@@ -167,10 +234,23 @@ void VLCMediaPlayer::initializeVLC()
         DBG ("libVLC version: " + juce::String (version));
     }
     
+    // Log available video outputs
+    libvlc_module_description_t* vouts = libvlc_video_filter_list_get(vlcInstance);
+    if (vouts != nullptr)
+    {
+        DBG ("Available video filters detected");
+        libvlc_module_description_list_release(vouts);
+    }
+    
     mediaPlayer = libvlc_media_player_new (vlcInstance);
     if (mediaPlayer == nullptr)
     {
         DBG ("Failed to create libVLC media player");
+        const char* vlcError = libvlc_errmsg();
+        if (vlcError != nullptr)
+        {
+            DBG ("libVLC error: " + juce::String(vlcError));
+        }
         return;
     }
     
@@ -642,6 +722,16 @@ void VLCMediaPlayer::videoDisplayCallback (void* data, void* picture)
     if (player == nullptr)
         return;
     
+    // Track frame count for debugging (only log occasionally)
+    static int frameCount = 0;
+    frameCount++;
+    if (frameCount == 1 || frameCount % 100 == 0)
+    {
+        DBG("VLCMediaPlayer::videoDisplayCallback - Frame " + juce::String(frameCount) + 
+            " received, size: " + juce::String(player->videoWidth.load()) + "x" + 
+            juce::String(player->videoHeight.load()));
+    }
+    
     // Convert the video frame buffer to JUCE Image
     player->updateVideoFrameFromBuffer();
 }
@@ -720,25 +810,38 @@ void VLCMediaPlayer::setupVideoCallbacks()
 
 void VLCMediaPlayer::setupVideoOutput()
 {
-    if (mediaPlayer == nullptr || videoComponent == nullptr)
+    if (mediaPlayer == nullptr)
         return;
     
-    DBG ("Setting up video output for component: " + juce::String::toHexString ((juce::pointer_sized_int)videoComponent.getComponent()));
+    // We use video memory callbacks (vmem) to capture frames into JUCE images,
+    // NOT native window rendering. The callbacks are set up in setupVideoCallbacks().
+    // Do NOT set native window handles (nsobject/hwnd/xwindow) as they conflict
+    // with the callback-based approach.
     
-    // Set native window handle for video output
-#if JUCE_WINDOWS
-    auto windowHandle = videoComponent->getWindowHandle();
-    DBG ("Windows HWND: " + juce::String::toHexString ((juce::pointer_sized_int)windowHandle));
-    libvlc_media_player_set_hwnd (mediaPlayer, windowHandle);
-#elif JUCE_MAC
-    auto windowHandle = videoComponent->getWindowHandle();
-    DBG ("macOS NSView: " + juce::String::toHexString ((juce::pointer_sized_int)windowHandle));
-    libvlc_media_player_set_nsobject (mediaPlayer, windowHandle);
-#elif JUCE_LINUX
-    auto windowHandle = videoComponent->getWindowHandle();
-    DBG ("Linux X11 Window: " + juce::String::toHexString ((juce::pointer_sized_int)windowHandle));
-    libvlc_media_player_set_xwindow (mediaPlayer, (uint32_t)(juce::pointer_sized_int)windowHandle);
-#endif
+    DBG ("Video output configured for memory callbacks (vmem)");
+    DBG ("  Video component: " + (videoComponent != nullptr ? 
+        juce::String::toHexString ((juce::pointer_sized_int)videoComponent.getComponent()) : "none"));
+    
+    // Note: If you want to render directly to a native window instead of using callbacks,
+    // uncomment the native window code below and remove setupVideoCallbacks() from open().
+    // The two approaches are mutually exclusive.
+    
+    /*
+    // Native window rendering (alternative to callbacks):
+    if (videoComponent != nullptr)
+    {
+        #if JUCE_WINDOWS
+            auto windowHandle = videoComponent->getWindowHandle();
+            libvlc_media_player_set_hwnd (mediaPlayer, windowHandle);
+        #elif JUCE_MAC
+            auto windowHandle = videoComponent->getWindowHandle();
+            libvlc_media_player_set_nsobject (mediaPlayer, windowHandle);
+        #elif JUCE_LINUX
+            auto windowHandle = videoComponent->getWindowHandle();
+            libvlc_media_player_set_xwindow (mediaPlayer, (uint32_t)(juce::pointer_sized_int)windowHandle);
+        #endif
+    }
+    */
 }
 
 void VLCMediaPlayer::setupEventHandling()
