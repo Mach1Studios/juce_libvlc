@@ -11,6 +11,22 @@
 // Include libVLC headers
 #include <vlc/vlc.h>
 #include <cstring>  // for std::memcpy
+#include <cstdlib>  // for setenv/putenv
+#include <vector>   // for std::vector
+
+// Cross-platform setenv wrapper
+#if JUCE_WINDOWS
+    #include <stdlib.h>
+    inline int vlc_setenv(const char* name, const char* value, int)
+    {
+        return _putenv_s(name, value);
+    }
+#else
+    inline int vlc_setenv(const char* name, const char* value, int overwrite)
+    {
+        return setenv(name, value, overwrite);
+    }
+#endif
 
 namespace juce
 {
@@ -132,7 +148,7 @@ void VLCMediaPlayer::initializeVLC()
             {
                 newPath += ":" + juce::String(currentPath);
             }
-            setenv("DYLD_LIBRARY_PATH", newPath.toUTF8(), 1);
+            vlc_setenv("DYLD_LIBRARY_PATH", newPath.toUTF8(), 1);
             DBG ("Set DYLD_LIBRARY_PATH to include: " + libsDir.getFullPathName());
         }
     }
@@ -141,8 +157,22 @@ void VLCMediaPlayer::initializeVLC()
         // Running from build directory or as standalone executable
         // Try to find plugins relative to executable
         juce::File executableDir = appBundle.getParentDirectory();
+        
+#if JUCE_WINDOWS
+        // Windows: Check for plugins in the same directory as the executable
+        pluginsDir = executableDir.getChildFile("plugins");
+        DBG ("Checking Windows executable path: " + pluginsDir.getFullPathName());
+        
+        if (!pluginsDir.exists())
+        {
+            // Also check vlc-install path (for development builds)
+            pluginsDir = executableDir.getChildFile("vlc-install/lib/vlc/plugins");
+            DBG ("Checking Windows build directory path: " + pluginsDir.getFullPathName());
+        }
+#else
         pluginsDir = executableDir.getChildFile("vlc-install/lib/vlc/plugins");
         DBG ("Checking build directory path: " + pluginsDir.getFullPathName());
+#endif
     }
     
     // If plugins found, set the path for VLC
@@ -161,7 +191,7 @@ void VLCMediaPlayer::initializeVLC()
         }
         
         DBG ("Setting VLC_PLUGIN_PATH to: " + pluginsDir.getFullPathName());
-        setenv("VLC_PLUGIN_PATH", pluginsDir.getFullPathName().toUTF8(), 1);
+        vlc_setenv("VLC_PLUGIN_PATH", pluginsDir.getFullPathName().toUTF8(), 1);
     }
     else
     {
@@ -173,7 +203,7 @@ void VLCMediaPlayer::initializeVLC()
     // Note: Don't specify --vout explicitly - VLC automatically uses vmem when
     // libvlc_video_set_callbacks() is called. Specifying it too early can cause issues.
     // Audio is disabled since we handle audio through JUCE's audio system.
-    const char* const vlc_args[] = {
+    std::vector<const char*> vlc_args = {
         "--intf=dummy",                 // Use dummy interface (no UI)
         "--no-video-title-show",        // Disable video title overlay
         "--verbose=2",                  // Enable verbose output for debugging
@@ -181,16 +211,17 @@ void VLCMediaPlayer::initializeVLC()
         "--network-caching=1000",       // Network caching (ms)
         "--file-caching=1000",          // File caching (ms)
         "--live-caching=1000",          // Live stream caching (ms)
-#if JUCE_MAC
-        "--no-xlib",                    // Disable X11 on macOS
-#endif
         "--no-drop-late-frames",        // Don't drop frames (for precise seeking)
         "--no-skip-frames",             // Don't skip frames
     };
     
-    int argc = sizeof(vlc_args) / sizeof(vlc_args[0]);
+#if JUCE_MAC
+    vlc_args.push_back("--no-xlib");    // Disable X11 on macOS
+#endif
+    
+    int argc = static_cast<int>(vlc_args.size());
     DBG ("Trying libVLC initialization with " + juce::String(argc) + " arguments...");
-    vlcInstance = libvlc_new (argc, vlc_args);
+    vlcInstance = libvlc_new (argc, vlc_args.data());
     
     if (vlcInstance == nullptr)
     {

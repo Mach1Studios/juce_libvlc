@@ -7,6 +7,8 @@
 #  LibVLC_LIBRARIES - Libraries to link against
 #  LibVLC_VERSION - Version of libVLC found
 #  LibVLC::LibVLC - Imported target for libVLC
+#  LibVLC_RUNTIME_DIR - Directory containing runtime DLLs (Windows)
+#  LibVLC_PLUGINS_DIR - Directory containing VLC plugins
 #
 # Cache variables:
 #  LIBVLC_ROOT - Root directory to search for libVLC (takes precedence)
@@ -22,13 +24,99 @@ set(LIBVLC_STATIC OFF CACHE BOOL "Link libVLC statically")
 set(LIBVLC_BUILD_FROM_SOURCE OFF CACHE BOOL "Build libVLC from source")
 
 # If building from source, look for pre-built VLC libraries
-# User should run m1-player/build_vlc.sh <build-dir> after CMake configure
+# User should run:
+#   macOS/Linux: m1-player/build_vlc.sh <build-dir>
+#   Windows: powershell m1-player/build_vlc.ps1 -BuildDir <build-dir>
 if(LIBVLC_BUILD_FROM_SOURCE)
     set(VLC_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../vlc")
     set(VLC_INSTALL_DIR "${CMAKE_BINARY_DIR}/vlc-install")
     
-    # Check for VLC source (supports both autotools and meson)
-    if(EXISTS "${VLC_SOURCE_DIR}/meson.build" OR EXISTS "${VLC_SOURCE_DIR}/configure.ac" OR EXISTS "${VLC_SOURCE_DIR}/configure")
+    # Windows: Check for downloaded SDK
+    if(WIN32)
+        message(STATUS "Building from source (Windows): Looking for VLC SDK")
+        message(STATUS "  Expected location: ${VLC_INSTALL_DIR}")
+        
+        # Check for Windows SDK structure (lib/libvlc.lib)
+        if(EXISTS "${VLC_INSTALL_DIR}/lib/libvlc.lib" AND EXISTS "${VLC_INSTALL_DIR}/include/vlc/vlc.h")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlc.lib")
+            message(STATUS "  Found: ${VLC_INSTALL_DIR}/lib/libvlccore.lib")
+            
+            # Set variables
+            set(LIBVLC_ROOT "${VLC_INSTALL_DIR}")
+            set(LibVLC_FOUND TRUE)
+            set(LibVLC_INCLUDE_DIRS "${VLC_INSTALL_DIR}/include")
+            set(LibVLC_VERSION "3.0.21")
+            
+            # Find the DLLs for runtime
+            set(LibVLC_RUNTIME_DIR "${VLC_INSTALL_DIR}/bin")
+            set(LibVLC_PLUGINS_DIR "${VLC_INSTALL_DIR}/lib/vlc/plugins")
+            
+            # Create imported target for libvlc
+            add_library(vlc_lib SHARED IMPORTED GLOBAL)
+            set_target_properties(vlc_lib PROPERTIES
+                IMPORTED_IMPLIB "${VLC_INSTALL_DIR}/lib/libvlc.lib"
+                IMPORTED_LOCATION "${VLC_INSTALL_DIR}/bin/libvlc.dll"
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            # Create imported target for libvlccore
+            add_library(vlccore_lib SHARED IMPORTED GLOBAL)
+            set_target_properties(vlccore_lib PROPERTIES
+                IMPORTED_IMPLIB "${VLC_INSTALL_DIR}/lib/libvlccore.lib"
+                IMPORTED_LOCATION "${VLC_INSTALL_DIR}/bin/libvlccore.dll"
+            )
+            
+            # Create LibVLC::LibVLC interface target
+            add_library(LibVLC::LibVLC INTERFACE IMPORTED GLOBAL)
+            set_property(TARGET LibVLC::LibVLC PROPERTY
+                INTERFACE_LINK_LIBRARIES vlc_lib vlccore_lib
+            )
+            set_property(TARGET LibVLC::LibVLC PROPERTY
+                INTERFACE_INCLUDE_DIRECTORIES "${VLC_INSTALL_DIR}/include"
+            )
+            
+            set(LibVLC_LIBRARIES vlc_lib vlccore_lib)
+            
+            # Store paths for bundling
+            set(LIBVLC_RUNTIME_DIR "${LibVLC_RUNTIME_DIR}" CACHE PATH "VLC runtime DLLs directory")
+            set(LIBVLC_PLUGINS_DIR "${LibVLC_PLUGINS_DIR}" CACHE PATH "VLC plugins directory")
+            
+            message(STATUS "Using VLC SDK (Windows dynamic linking)")
+            message(STATUS "  Runtime DLLs: ${LibVLC_RUNTIME_DIR}")
+            message(STATUS "  Plugins: ${LibVLC_PLUGINS_DIR}")
+            return()
+        else()
+            message(STATUS "")
+            message(STATUS "========================================")
+            message(STATUS "VLC SDK not found!")
+            message(STATUS "========================================")
+            message(STATUS "This is expected on first configure.")
+            message(STATUS "Download and setup VLC SDK by running:")
+            message(STATUS "  cd ${CMAKE_SOURCE_DIR}")
+            if(CMAKE_BINARY_DIR MATCHES "build-dev")
+                message(STATUS "  powershell -ExecutionPolicy Bypass -File build_vlc.ps1 -BuildDir build-dev")
+            else()
+                message(STATUS "  powershell -ExecutionPolicy Bypass -File build_vlc.ps1 -BuildDir build")
+            endif()
+            message(STATUS "")
+            message(STATUS "Or from the repo root:")
+            message(STATUS "  make build-vlc")
+            message(STATUS "")
+            message(STATUS "Then reconfigure CMake:")
+            if(CMAKE_BINARY_DIR MATCHES "build-dev")
+                message(STATUS "  make dev-player")
+            else()
+                message(STATUS "  make configure")
+            endif()
+            message(STATUS "========================================")
+            message(STATUS "")
+            message(WARNING "VLC SDK not found. Run build_vlc.ps1 then reconfigure.")
+            
+            set(LIBVLC_BUILD_FROM_SOURCE OFF)
+            set(LibVLC_FOUND FALSE)
+        endif()
+    # macOS/Linux: Check for source build
+    elseif(EXISTS "${VLC_SOURCE_DIR}/meson.build" OR EXISTS "${VLC_SOURCE_DIR}/configure.ac" OR EXISTS "${VLC_SOURCE_DIR}/configure")
         message(STATUS "Building from source: Looking for pre-built VLC libraries")
         message(STATUS "  Expected location: ${VLC_INSTALL_DIR}")
         
